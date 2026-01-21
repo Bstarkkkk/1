@@ -4,7 +4,7 @@
 // @version      2.6
 // @description  保留上一版 Zampto 核心逻辑，仅优化日志打印与日志区 UI
 // @author       Gemini
-// @match        https://dash.zampto.net/server?id=2711
+// @match        https://dash.zampto.net/server?id=2712
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
