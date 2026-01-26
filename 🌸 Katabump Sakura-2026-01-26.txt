@@ -1,0 +1,248 @@
+// ==UserScript==
+// @name         🌸 Katabump Sakura
+// @namespace    Katabump-Sakura
+// @version      2.0
+// @description  自动监控续期时间，执行续期（优化 Docker Firefox 长时间运行）
+// @author       👸🏻洛思👸🏻
+// @match        https://dashboard.katabump.com/servers/edit?id=*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
+// @run-at       document-idle
+// @connect      api.telegram.org
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    //===========================================================================
+    //  ⚙️ 核心配置
+    //===========================================================================
+    const SERVER_ID = '164794';
+    const EARLY_DAYS = 1;
+    const CHECK_INTERVAL = 3000;
+    const MAX_LOGS = 50;
+    const STORAGE_KEY = 'kb_sakura_v2_data';
+    const STATE_KEY = 'kb_sakura_v2_state';
+    const TG_CONFIG = { chatId: '6839843424', token: '8522009909:AAF-3TZ6LJwf1ZoCYbdNp7qOstPoS_PqwJw' };
+    const START_LOG_MSG = "🌸 Katebump Sakura 已启动";
+
+    let state = GM_getValue(STATE_KEY, { isRenewing: false, waitingForTurnstile: false, startTime: 0 });
+    let data = GM_getValue(STORAGE_KEY, { logs: [], isPaused: false, lastRunDate: '2026-01-26 13:13:36', expiryDate: '监控中...', nextRunTime: 0, lastResult: '等待运行' });
+
+    function saveState() { GM_setValue(STATE_KEY, state); }
+    function saveData() { GM_setValue(STORAGE_KEY, data); }
+
+    const getBeijingTime = () => {
+        const d = new Date();
+        const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
+        return new Date(utc + (3600000 * 8));
+    };
+
+    const getFullTimeStr = () => {
+        const d = getBeijingTime();
+        const pad = (n) => n.toString().padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    };
+
+    const getRemainingStr = () => {
+        if (!data.nextRunTime) return "";
+        const diff = data.nextRunTime - Date.now();
+        if (diff <= 0) return "(准备执行)";
+        const d = Math.floor(diff/86400000), h = Math.floor((diff%86400000)/3600000), m = Math.floor((diff%3600000)/60000);
+        return `(剩余 ${d}d ${h}h ${m}m)`;
+    };
+
+    function sendTG(text) {
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `https://api.telegram.org/bot${TG_CONFIG.token}/sendMessage`,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify({ chat_id: TG_CONFIG.chatId, text: `🌸 【Katabump Sakura】\n${text}` })
+        });
+    }
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    //===========================================================================
+    //  🎨 UI 面板 (1:1 复刻 Zampto 样式)
+    //===========================================================================
+    const UI = {
+        init() {
+            GM_addStyle(`
+                #zm-panel { position: fixed; bottom: 15px; right: 15px; width: 260px; background: rgba(255, 255, 255, 0.98); color: #444; z-index: 9999999 !important; border-radius: 10px; box-shadow: 0 4px 20px rgba(255, 183, 178, 0.4); font-family: system-ui, -apple-system, sans-serif; font-size: 12px; border: 1px solid #ffd1d1; }
+                #zm-header { padding: 8px 12px; background: linear-gradient(135deg, #ff9a9e 0%, #ffc3a0 100%); border-radius: 10px 10px 0 0; color: #fff; font-weight: 600; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+                #zm-content { padding: 10px; }
+                .zm-row { margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+                .zm-label { color: #666; font-size: 11px; font-weight: bold; }
+                .zm-val { font-family: "SF Mono", monospace; font-weight: bold; font-size: 11px; }
+                #zm-logs { height: 120px; overflow-y: scroll; background: #ffffff; border: 2px solid #fce4ec; border-radius: 8px; padding: 6px; margin-top: 10px; font-family: monospace; font-size: 10px; box-shadow: inset 0 2px 6px rgba(0,0,0,0.02); }
+                .log-row { margin-bottom: 4px; line-height: 1.3; border-bottom: 1px dashed #fce4ec; padding-bottom: 2px; display: flex; }
+                .log-time { color: #8d6e63; margin-right: 5px; font-size: 9px; flex-shrink: 0; }
+                .log-msg-success { color: #43a047; font-weight: bold; }
+                .log-msg-warn { color: #fb8c00; }
+                .log-msg-error { color: #e74c3c; font-weight: bold; }
+                .zm-btn-group { display: flex; gap: 6px; margin-top: 10px; }
+                .zm-btn { flex: 1; padding: 6px 0; border: none; border-radius: 5px; cursor: pointer; color: white; font-weight: 600; font-size: 11px; transition: 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                .btn-start { background: linear-gradient(to right, #00b894, #55efc4); }
+                .btn-pause { background: linear-gradient(to right, #ff7675, #fab1a0); }
+                .btn-run { background: linear-gradient(to right, #6c5ce7, #a29bfe); }
+                .btn-clear { background: #dfe6e9; color: #636e72; }
+                #zm-logs::-webkit-scrollbar { width: 3px; }
+                #zm-logs::-webkit-scrollbar-thumb { background: #ffb7b2; border-radius: 2px; }
+                .status-running { color: #fff; font-size: 10px; background: rgba(255,255,255,0.2); padding: 2px 5px; border-radius: 4px; }
+            `);
+            const panel = document.createElement('div');
+            panel.id = 'zm-panel';
+            document.body.appendChild(panel);
+            this.refresh();
+        },
+        refresh() {
+            const resColor = data.lastResult.includes('✅') ? '#00b894' : (data.lastResult.includes('⚠️') ? '#fb8c00' : '#e74c3c');
+            document.getElementById('zm-panel').innerHTML = `
+                <div id="zm-header"><span>🌸 Katabump Sakura</span><span id="zm-status" class="status-running">${data.isPaused?'⏸ 暂停':'⚡ 运行中'}</span></div>
+                <div id="zm-content">
+                    <div class="zm-row"><span class="zm-label">🚀 运行日期</span><span class="zm-val" style="color: #6c5ce7;">${data.lastRunDate}</span></div>
+                    <div class="zm-row"><span class="zm-label">📅 下次续期</span><span id="zm-next-renew" class="zm-val" style="color: #00b894;">计算中...</span></div>
+                    <div class="zm-row"><span class="zm-label">⏳ 利用期限</span><span id="zm-expiry" class="zm-val" style="color: #fd79a8;">${data.expiryDate}</span></div>
+                    <div class="zm-row"><span class="zm-label">📝 续期结果</span><span id="zm-result" class="zm-val" style="color: ${resColor};">${data.lastResult}</span></div>
+                    <div class="zm-btn-group">
+                        <button id="zm-toggle-btn" class="zm-btn ${data.isPaused ? 'btn-start' : 'btn-pause'}">${data.isPaused ? '▶ 启动' : '⏸ 暂停'}</button>
+                        <button id="zm-run-btn" class="zm-btn btn-run">🚀 手动续期</button>
+                        <button id="zm-clear-btn" class="zm-btn btn-clear">清空</button>
+                    </div>
+                    <div id="zm-logs"></div>
+                </div>`;
+            this.bind();
+            this.renderLogs();
+        },
+        bind() {
+            document.getElementById('zm-toggle-btn').onclick = () => { data.isPaused = !data.isPaused; saveData(); location.reload(); };
+            document.getElementById('zm-clear-btn').onclick = () => {
+                // 只保留启动日志，清空其他
+                data.logs = data.logs.filter(l => l.msg === START_LOG_MSG);
+                if (data.logs.length === 0) UI.log(START_LOG_MSG, "success");
+                saveData();
+                this.renderLogs();
+            };
+            document.getElementById('zm-run-btn').onclick = () => {
+                UI.log(`🖱️ 手动续期 ${getRemainingStr()}`, "warn");
+                executeRenew();
+            };
+        },
+        log(msg, type = 'info') {
+            // 如果是启动日志且已存在，则不重复添加
+            if (msg === START_LOG_MSG && data.logs.some(l => l.msg === START_LOG_MSG)) return;
+            // 普通日志去重
+            if (data.logs.length > 0 && data.logs[0].msg === msg) return;
+
+            const time = getBeijingTime().toLocaleTimeString('en-GB', { hour12: false });
+            data.logs.unshift({ time, msg, type });
+            if (data.logs.length > MAX_LOGS) data.logs.pop();
+            saveData(); this.renderLogs();
+        },
+        renderLogs() {
+            const container = document.getElementById('zm-logs');
+            if (container) container.innerHTML = data.logs.map(l => `<div class="log-row"><span class="log-time">[${l.time}]</span><span class="log-msg-${l.type}">${l.msg}</span></div>`).join('');
+        },
+        updateCountdown() {
+            const el = document.getElementById('zm-next-renew');
+            if (!el || !data.nextRunTime) return;
+            const diff = data.nextRunTime - Date.now();
+            if (diff > 0) {
+                const d = Math.floor(diff/86400000), h = Math.floor((diff%86400000)/3600000), m = Math.floor((diff%3600000)/60000);
+                el.innerText = `${d}天${h}时${m}分`;
+            } else el.innerText = "准备执行";
+        }
+    };
+
+    function checkTurnstileStable() {
+        const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
+        if (cfInput && cfInput.value && cfInput.value.length > 100) return 'completed';
+        return document.querySelector('.cf-turnstile') ? 'pending' : 'none';
+    }
+
+    function monitorExpiry() {
+        let foundDate = null;
+        const labels = document.querySelectorAll('div.label');
+        let targetLabel = Array.from(labels).find(el => el.innerText.trim() === 'Expiry');
+        if (targetLabel) {
+            const valueDiv = targetLabel.nextElementSibling;
+            if (valueDiv && /^\d{4}-\d{2}-\d{2}$/.test(valueDiv.innerText.trim())) foundDate = valueDiv.innerText.trim();
+        }
+        if (!foundDate) {
+            const el = document.querySelector('div.col-lg-9.col-md-8');
+            if (el && /^\d{4}-\d{2}-\d{2}$/.test(el.innerText.trim())) foundDate = el.innerText.trim();
+        }
+        if (foundDate && data.expiryDate !== foundDate) {
+            data.expiryDate = foundDate;
+            data.nextRunTime = new Date(foundDate + 'T00:00:00').getTime() - (EARLY_DAYS * 86400000);
+            saveData(); UI.refresh();
+        }
+    }
+
+    function handleResultState() {
+        const alertBox = document.querySelector('div.alert.alert-danger') || document.querySelector('div.alert.alert-success');
+        if (alertBox) {
+            const text = alertBox.innerText.trim();
+            data.lastRunDate = getFullTimeStr();
+            if (text.includes("can't renew") || text.includes("able to")) {
+                data.lastResult = "⚠️ 续期等待！";
+                UI.log("⚠️ 续期等待！", "warn");
+            } else if (text.includes("successfully") || text.includes("extended")) {
+                data.lastResult = "✅ 续期成功！";
+                UI.log("🎉 续期成功！", "success");
+                sendTG(`✅ 续期成功！\n利用期限：${data.expiryDate}`);
+            } else {
+                data.lastResult = "❌ 续期失败！";
+                UI.log("❌ 续期失败！", "error");
+            }
+            saveData(); state.isRenewing = false; state.waitingForTurnstile = false; saveState(); UI.refresh();
+            setTimeout(() => { window.location.href = `https://dashboard.katabump.com/servers/edit?id=${SERVER_ID}`; }, 3000);
+        }
+    }
+
+    async function submitRenewal() {
+        UI.log("🤖 🛡️ ✨ Turnstile 验证完成", "success");
+        await sleep(1000);
+        const submitBtn = document.querySelector('#renew-modal button[type="submit"].btn-primary');
+        if (submitBtn) {
+            UI.log("🚀 续期中...", "warn");
+            submitBtn.click();
+            await sleep(4000);
+            handleResultState();
+        } else { state.isRenewing = false; saveState(); UI.refresh(); }
+    }
+
+    async function executeRenew() {
+        if (state.isRenewing) return;
+        state.isRenewing = true; state.startTime = Date.now(); saveState();
+        const btn = document.querySelector('button[data-bs-target="#renew-modal"]');
+        if (btn) {
+            btn.click();
+            UI.log("⏳ 等待人机验证...", "warn");
+            state.waitingForTurnstile = true; saveState();
+        } else { state.isRenewing = false; saveState(); }
+    }
+
+    function mainLoop() {
+        if (data.isPaused) return;
+        monitorExpiry(); UI.updateCountdown();
+        if (state.isRenewing && state.startTime > 0 && (Date.now() - state.startTime > 180000)) { state.isRenewing = false; state.waitingForTurnstile = false; saveState(); UI.refresh(); }
+        if (state.waitingForTurnstile && checkTurnstileStable() === 'completed') { state.waitingForTurnstile = false; saveState(); submitRenewal(); }
+        if (data.nextRunTime && !state.isRenewing && Date.now() >= data.nextRunTime) executeRenew();
+    }
+
+    UI.init();
+
+    // 确保启动日志永远存在
+    if (!data.logs.some(l => l.msg === START_LOG_MSG)) {
+        UI.log(START_LOG_MSG, "success");
+    }
+
+    if (!data.isPaused) {
+        setInterval(mainLoop, CHECK_INTERVAL);
+        if (window.location.search.includes('renew')) handleResultState();
+    }
+})();
