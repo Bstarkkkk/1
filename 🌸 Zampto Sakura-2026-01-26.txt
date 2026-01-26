@@ -4,7 +4,7 @@
 // @version      2.0
 // @description  自动监控续期时间，执行续期（优化 Docker Firefox 长时间运行）
 // @author       👸🏻洛思👸🏻
-// @match        https://dash.zampto.net/server?id=2711
+// @match        https://dash.zampto.net/server?id=2712
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
