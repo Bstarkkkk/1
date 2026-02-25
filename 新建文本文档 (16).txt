@@ -1,0 +1,114 @@
+// ==UserScript==
+// @name         MineSttr 自动点击助手 (终极版)
+// @namespace    http://tampermonkey.net/
+// @version      4.0
+// @description  放弃API，直接模拟鼠标点击网页上的 Start/Restart 按钮
+// @author       Gemini
+// @match        https://minestrator.com/my/server/*
+// @match        https://minestrator.com/my/dashboard
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ============ ⚙️ 配置区域 ============
+    const CONFIG = {
+        // 重启间隔：3小时55分 (14100秒)
+        restartInterval: 235 * 60 * 1000,
+
+        // 检测频率：每 10 秒看一眼屏幕
+        checkLoop: 10000
+    };
+
+    // ============ 🖥️ 状态面板 ============
+    const ui = document.createElement('div');
+    Object.assign(ui.style, {
+        position: 'fixed', bottom: '15px', left: '15px',
+        backgroundColor: 'rgba(0, 50, 0, 0.9)', color: '#00ff00',
+        padding: '15px', borderRadius: '8px', fontSize: '13px',
+        fontFamily: 'monospace', zIndex: 999999, pointerEvents: 'none',
+        border: '1px solid #00ff00', boxShadow: '0 0 15px rgba(0,255,0,0.2)'
+    });
+    ui.innerHTML = '🤖 视觉挂机系统启动中...';
+    document.body.appendChild(ui);
+
+    // 记录上次重启时间
+    let lastRestartTime = Date.now();
+
+    function log(msg) {
+        const time = new Date().toLocaleTimeString('zh-CN', {hour12: false});
+        ui.innerHTML = `[${time}] ${msg}<br>${ui.innerHTML}`;
+        const lines = ui.innerHTML.split('<br>');
+        if (lines.length > 6) ui.innerHTML = lines.slice(0, 6).join('<br>');
+    }
+
+    // 辅助函数：根据文本内容找按钮
+    function findButtonByText(keywords) {
+        const buttons = document.querySelectorAll('button, a.btn');
+        for (let btn of buttons) {
+            const text = btn.innerText.toLowerCase().trim();
+            for (let key of keywords) {
+                if (text.includes(key)) return btn;
+            }
+        }
+        return null;
+    }
+
+    // ============ 🚀 核心逻辑 ============
+    function checkAndClick() {
+        const now = Date.now();
+        const timeSinceLast = now - lastRestartTime;
+        const timeLeft = Math.max(0, CONFIG.restartInterval - timeSinceLast);
+        const timeLeftMinutes = (timeLeft / 60000).toFixed(0);
+
+        // 1. 优先检查：是否关机了？(找 Start 按钮)
+        // 关键词涵盖 英文(Start)、法文(Démarrer)、中文
+        const startBtn = findButtonByText(['start', 'démarrer', '启动']);
+
+        if (startBtn && startBtn.offsetParent !== null) { // 按钮存在且可见
+            log("⚠️ 检测到服务器离线，正在点击 Start...");
+            startBtn.click();
+            lastRestartTime = now; // 重置计时
+            return;
+        }
+
+        // 2. 检查：是否需要定时重启？(找 Restart 按钮)
+        if (timeSinceLast >= CONFIG.restartInterval) {
+            const restartBtn = findButtonByText(['restart', 'redémarrer', 'reboot', '重启']);
+
+            if (restartBtn && restartBtn.offsetParent !== null) {
+                log("⏰ 计划时间已到，正在执行重启...");
+                restartBtn.click();
+                lastRestartTime = now;
+            } else {
+                // 如果找不到 Restart 按钮（可能在 Dashboard 只是图标），尝试找 Stop 再找 Start
+                // 这里建议用户停留在 /manage 页面，因为那里按钮是文字的，最稳
+                log("❌ 时间到了，但没找到重启按钮 (请确认你在 Manage 页面)");
+            }
+        } else {
+            // 只是为了更新 UI 显示倒计时
+            // 更新第一行日志显示倒计时状态
+            const statusLine = `⏳ 下次重启: ${timeLeftMinutes} 分钟后`;
+            // 简单的 UI 更新逻辑，避免刷屏
+            if (!ui.innerHTML.includes("分钟后")) {
+                 log(statusLine);
+            } else {
+                 // 替换最新的倒计时显示
+                 let html = ui.innerHTML.split('<br>');
+                 // 找到包含“分钟后”的那一行并更新，或者直接忽略如果不重要
+            }
+        }
+    }
+
+    // ============ ⏳ 启动 ============
+    log("✅ 脚本已就绪，请保持此页面开启");
+    log("👉 建议停留在 Server Manage 详情页");
+
+    // 立即检查一次
+    setTimeout(checkAndClick, 3000);
+
+    // 开启循环
+    setInterval(checkAndClick, CONFIG.checkLoop);
+
+})();
