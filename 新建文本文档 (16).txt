@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MineSttr Guardian Pro (v7.3 暴力兼容版)
+// @name         MineSttr Guardian Pro (v7.4 右下角版)
 // @namespace    MineSttr-Guard
-// @version      7.3
-// @description  松散匹配算法，无视空格和特殊符号，精确读取秒数，防误判0秒
+// @version      7.4
+// @description  将面板移至右下角，防止遮挡控制台输入，功能保持不变
 // @author       Gemini
 // @match        https://minestrator.com/my/server/*
 // @grant        GM_setValue
@@ -15,9 +15,9 @@
 
     // ============ ⚙️ 核心配置 ============
     const CONFIG = {
-        thresholdMinutes: 10, // 剩余 10 分钟时重启
-        checkInterval: 2000,  // 每 2 秒刷新一次 (为了秒数跳动)
-        gracePeriod: 5000,    // 5秒缓冲
+        thresholdMinutes: 10,
+        checkInterval: 2000,
+        gracePeriod: 5000,
         maxLogs: 50
     };
 
@@ -26,10 +26,14 @@
     function saveState() { GM_setValue('minesttr_state_v7', state); }
     const sessionStartTime = Date.now();
 
-    // ============ 🎨 UI 样式 ============
+    // ============ 🎨 UI 样式 (移至右下角) ============
     GM_addStyle(`
         #mst-panel {
-            position: fixed; bottom: 20px; left: 20px; width: 290px;
+            position: fixed; 
+            bottom: 20px; 
+            right: 20px; /* 改为靠右 */
+            left: auto;  /* 取消靠左 */
+            width: 290px;
             background: rgba(10, 10, 10, 0.98); color: #00b894;
             border: 1px solid #00b894; border-radius: 4px;
             font-family: "Consolas", monospace; font-size: 12px; z-index: 999999;
@@ -132,20 +136,13 @@
     };
 
     // ============ 🧠 核心逻辑 (v7.3 暴力匹配) ============
-    
     function parseTime() {
         const fullText = document.body.innerText;
-        
-        // 1. 先找到 "Shuts down in" 这个关键词
-        // 我们只截取关键词后面的 20 个字符来分析，避免匹配到其他地方的数字
         const keywordIndex = fullText.indexOf("Shuts down in");
         if (keywordIndex === -1) return null;
 
-        // 截取 "Shuts down in" 后面的一段文字 (例如 " 3h 28m 42s ...")
         const timeSegment = fullText.substring(keywordIndex + 13, keywordIndex + 40);
 
-        // 2. 独立匹配 h, m, s
-        // 不管它们之间有什么符号，只要有 "数字+h" 这种格式就算
         let h = 0, m = 0, s = 0;
         let foundAny = false;
 
@@ -158,15 +155,11 @@
         const matchS = timeSegment.match(/(\d+)\s*s/i);
         if (matchS) { s = parseInt(matchS[1]); foundAny = true; }
 
-        // 如果连一个时间单位都没找到，说明可能正在加载或者格式不对
         if (!foundAny) return null;
 
         const totalSeconds = (h * 3600) + (m * 60) + s;
-
-        // 安全检查：如果总秒数是0，但又不是真的显示 "0s"，说明读错了，返回null防误触
         if (totalSeconds === 0 && !timeSegment.includes('0s')) return null;
 
-        // 生成显示字符串
         let displayStr = "";
         if (h > 0) displayStr += `${h}h `;
         if (m > 0 || h > 0) displayStr += `${m}m `;
@@ -192,14 +185,11 @@
         const timeElapsed = now - sessionStartTime;
         const timeData = parseTime();
 
-        // 🟢 情况 1: 成功读到时间 (在线)
         if (timeData !== null) {
             const { totalSeconds, displayStr } = timeData;
-            
             UI.updateCount(displayStr, "#00b894");
             
             const thresholdSeconds = CONFIG.thresholdMinutes * 60;
-            
             if (totalSeconds <= thresholdSeconds) {
                 UI.log(`⚡ 剩余 ${totalSeconds}秒 -> 重启`, 'warn');
                 const btn = findButton('restart') || findButton('reboot') || findButton('重启');
@@ -211,7 +201,6 @@
                 }
             }
         } 
-        // 🔴 情况 2: 没读到时间
         else {
             if (timeElapsed < CONFIG.gracePeriod) {
                 const wait = Math.ceil((CONFIG.gracePeriod - timeElapsed)/1000);
@@ -227,7 +216,6 @@
         }
     }
 
-    // ============ 🚀 启动 ============
     UI.init();
     setInterval(mainLoop, CONFIG.checkInterval);
     setTimeout(mainLoop, 1000);
