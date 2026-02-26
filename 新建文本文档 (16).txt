@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MineSttr Guardian Pro (v7.4 右下角版)
+// @name         MineSttr Guardian Pro (v7.5 猎人版)
 // @namespace    MineSttr-Guard
-// @version      7.4
-// @description  将面板移至右下角，防止遮挡控制台输入，功能保持不变
+// @version      7.5
+// @description  修复“重启按钮”找不到的问题，支持识别纯图标按钮，右下角面板
 // @author       Gemini
 // @match        https://minestrator.com/my/server/*
 // @grant        GM_setValue
@@ -15,9 +15,9 @@
 
     // ============ ⚙️ 核心配置 ============
     const CONFIG = {
-        thresholdMinutes: 10,
-        checkInterval: 2000,
-        gracePeriod: 5000,
+        thresholdMinutes: 10, // 剩余 10 分钟时重启
+        checkInterval: 2000,  // 每 2 秒检查一次
+        gracePeriod: 5000,    // 5秒缓冲
         maxLogs: 50
     };
 
@@ -26,14 +26,10 @@
     function saveState() { GM_setValue('minesttr_state_v7', state); }
     const sessionStartTime = Date.now();
 
-    // ============ 🎨 UI 样式 (移至右下角) ============
+    // ============ 🎨 UI 样式 (右下角) ============
     GM_addStyle(`
         #mst-panel {
-            position: fixed; 
-            bottom: 20px; 
-            right: 20px; /* 改为靠右 */
-            left: auto;  /* 取消靠左 */
-            width: 290px;
+            position: fixed; bottom: 20px; right: 20px; width: 290px;
             background: rgba(10, 10, 10, 0.98); color: #00b894;
             border: 1px solid #00b894; border-radius: 4px;
             font-family: "Consolas", monospace; font-size: 12px; z-index: 999999;
@@ -119,6 +115,7 @@
         },
         log(msg, type = 'info') {
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            // 简单的防刷屏：如果上一条消息完全一样，就不重复发
             if (state.logs.length > 0 && state.logs[0].msg === msg) return;
             state.logs.unshift({ time, msg, type });
             if (state.logs.length > CONFIG.maxLogs) state.logs.pop();
@@ -135,7 +132,8 @@
         }
     };
 
-    // ============ 🧠 核心逻辑 (v7.3 暴力匹配) ============
+    // ============ 🧠 核心逻辑 (v7.5 增强版) ============
+    
     function parseTime() {
         const fullText = document.body.innerText;
         const keywordIndex = fullText.indexOf("Shuts down in");
@@ -158,6 +156,7 @@
         if (!foundAny) return null;
 
         const totalSeconds = (h * 3600) + (m * 60) + s;
+        // 防误触：如果读出来是0但文字里没有0s，说明读错了
         if (totalSeconds === 0 && !timeSegment.includes('0s')) return null;
 
         let displayStr = "";
@@ -168,12 +167,44 @@
         return { totalSeconds, displayStr };
     }
 
+    // ⭐ 升级后的按钮寻找函数：支持图标识别 ⭐
     function findButton(keyword) {
-        const buttons = document.querySelectorAll('button, a.btn');
+        // 定义关键词对应的常见图标类名
+        const iconMap = {
+            'restart': ['fa-redo', 'fa-sync', 'fa-refresh', 'fa-rotate-right', 'fa-undo'],
+            'start': ['fa-play', 'fa-power-off'],
+            'stop': ['fa-stop', 'fa-ban']
+        };
+
+        const buttons = document.querySelectorAll('button, a.btn, a[role="button"], div.btn');
+
         for (let btn of buttons) {
+            // A. 检查文字 (innerText)
             const text = btn.innerText.toLowerCase().trim();
             if (keyword === 'start' && text.includes('restart')) continue;
             if (text.includes(keyword) && btn.offsetParent !== null) return btn;
+
+            // B. 检查链接或 onclick 属性 (href=".../restart")
+            const href = (btn.getAttribute('href') || "").toLowerCase();
+            const action = (btn.getAttribute('onclick') || "").toLowerCase();
+            const title = (btn.getAttribute('title') || "").toLowerCase();
+            
+            if (href.includes(keyword) || action.includes(keyword) || title.includes(keyword)) {
+                 if (btn.offsetParent !== null) return btn;
+            }
+
+            // C. 检查图标 (针对纯图标按钮)
+            // 如果我们要找 restart，就去看看按钮里有没有 🔄 这种图标
+            if (iconMap[keyword]) {
+                const icon = btn.querySelector('i, svg');
+                if (icon) {
+                    const iconClass = (icon.getAttribute('class') || "").toLowerCase();
+                    // 只要图标类名里包含 redo, sync, refresh 等字眼
+                    if (iconMap[keyword].some(cls => iconClass.includes(cls)) && btn.offsetParent !== null) {
+                        return btn;
+                    }
+                }
+            }
         }
         return null;
     }
@@ -185,26 +216,35 @@
         const timeElapsed = now - sessionStartTime;
         const timeData = parseTime();
 
+        // 🟢 情况 1: 在线 (读到时间)
         if (timeData !== null) {
             const { totalSeconds, displayStr } = timeData;
+            
             UI.updateCount(displayStr, "#00b894");
             
             const thresholdSeconds = CONFIG.thresholdMinutes * 60;
+            
             if (totalSeconds <= thresholdSeconds) {
-                UI.log(`⚡ 剩余 ${totalSeconds}秒 -> 重启`, 'warn');
+                // 时间到了，尝试找重启按钮
+                UI.log(`⚡ 剩余 ${totalSeconds}秒 -> 尝试重启`, 'warn');
                 const btn = findButton('restart') || findButton('reboot') || findButton('重启');
+                
                 if (btn) { 
                     btn.click(); 
-                    UI.log('✅ 指令发送成功', 'success'); 
+                    UI.log('✅ 已点击重启按钮', 'success'); 
+                    // 点击后给自己放个假，防止1秒内点多次
+                    state.isPaused = true; 
+                    setTimeout(() => { state.isPaused = false; saveState(); }, 5000);
                 } else {
-                    UI.log('❌ 未找到重启按钮', 'error');
+                    UI.log('❌ 找不到重启按钮 (图标识别失败?)', 'error');
                 }
             }
         } 
+        // 🔴 情况 2: 离线 (没读到时间)
         else {
             if (timeElapsed < CONFIG.gracePeriod) {
                 const wait = Math.ceil((CONFIG.gracePeriod - timeElapsed)/1000);
-                UI.updateCount(`读取中... ${wait}s`, "#f1c40f");
+                UI.updateCount(`读取缓冲... ${wait}s`, "#f1c40f");
             } else {
                 UI.updateCount("OFFLINE / 离线", "#ff7675");
                 const btn = findButton('start') || findButton('启动');
@@ -216,6 +256,7 @@
         }
     }
 
+    // ============ 🚀 启动 ============
     UI.init();
     setInterval(mainLoop, CONFIG.checkInterval);
     setTimeout(mainLoop, 1000);
