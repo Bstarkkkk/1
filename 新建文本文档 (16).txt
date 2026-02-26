@@ -1,123 +1,225 @@
 // ==UserScript==
-// @name         MineSttr 智能守护 (v5.2 暴力读取版)
-// @namespace    http://tampermonkey.net/
-// @version      5.2
-// @description  使用全局文字匹配解决找不到倒计时的问题，移除误导性的Offline检查
+// @name         MineSttr Guardian Pro (v7.1 极速版)
+// @namespace    MineSttr-Guard
+// @version      7.1
+// @description  5秒微缓冲，既防止刚刷新时的误判，又不浪费时间
 // @author       Gemini
 // @match        https://minestrator.com/my/server/*
-// @grant        none
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // ============ ⚙️ 配置区域 ============
+    // ============ ⚙️ 核心配置 ============
     const CONFIG = {
-        // 剩余多少分钟时重启？(建议 10 分钟)
-        restartThreshold: 10,
-
-        // 检查频率：每 10 秒检查一次 (加快一点以免漏掉)
-        checkLoop: 10000 
+        threshold: 10,        // 剩余 10 分钟时重启
+        checkInterval: 5000,  // 每 5 秒检查一次 (加快检查频率)
+        
+        // 🛡️ 缓冲期改为 5000 毫秒 (5秒)
+        // 页面刚刷新的 5 秒内，禁止点击“Start”按钮，给网页文字加载留点时间
+        gracePeriod: 5000,   
+        
+        maxLogs: 50           // 日志保留条数
     };
 
-    // ============ 🖥️ 状态面板 ============
-    const ui = document.createElement('div');
-    Object.assign(ui.style, {
-        position: 'fixed', bottom: '15px', left: '15px',
-        backgroundColor: 'rgba(0, 0, 0, 0.9)', color: '#00ffff',
-        padding: '12px', borderRadius: '8px', fontSize: '13px',
-        fontFamily: 'Consolas, monospace', zIndex: 999999, pointerEvents: 'none',
-        border: '1px solid #00ffff', boxShadow: '0 0 15px rgba(0,255,255,0.3)',
-        minWidth: '240px'
+    // ============ 💾 状态管理 ============
+    let state = GM_getValue('minesttr_state_v7', {
+        isPaused: false,
+        logs: []
     });
-    ui.innerHTML = '👁️ v5.2 视觉系统启动...';
-    document.body.appendChild(ui);
 
-    function updateUI(status, color = '#00ffff') {
-        const time = new Date().toLocaleTimeString('zh-CN', {hour12: false});
-        ui.style.color = color;
-        ui.style.borderColor = color;
-        ui.innerHTML = `[${time}] ${status}`;
+    function saveState() {
+        GM_setValue('minesttr_state_v7', state);
     }
 
-    // ============ 🧠 核心功能 (暴力匹配) ============
+    // 记录本次脚本启动时间
+    const sessionStartTime = Date.now();
 
-    // 1. 全局搜索倒计时 (最核心的改动)
-    function getRemainingMinutes() {
-        // 直接获取整个网页的纯文本，不管它藏在哪个标签里
-        const fullText = document.body.innerText;
+    // ============ 🎨 UI 样式 (极客黑绿) ============
+    GM_addStyle(`
+        #mst-panel {
+            position: fixed; bottom: 20px; left: 20px; width: 280px;
+            background: rgba(10, 10, 10, 0.95);
+            color: #00b894;
+            border: 1px solid #00b894;
+            border-radius: 4px;
+            font-family: "Consolas", monospace;
+            font-size: 12px;
+            z-index: 999999;
+            box-shadow: 0 0 10px rgba(0, 184, 148, 0.15);
+        }
+        #mst-header {
+            padding: 6px 10px;
+            border-bottom: 1px solid #00b894;
+            display: flex; justify-content: space-between; align-items: center;
+            font-weight: bold; background: rgba(0, 184, 148, 0.1);
+        }
+        #mst-content { padding: 10px; }
+        .mst-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .mst-val { font-weight: bold; color: #fff; }
         
-        // 匹配格式: Shuts down in 3h 50m 或 Shuts down in 50m
-        // 使用正则直接在全文里找
+        /* 按钮 */
+        .mst-btn-group { display: flex; gap: 5px; margin-top: 8px; margin-bottom: 8px; }
+        .mst-btn {
+            flex: 1; padding: 4px 0; border: 1px solid #333; border-radius: 3px;
+            cursor: pointer; color: #fff; background: #2d3436; font-size: 11px;
+        }
+        .mst-btn:hover { background: #636e72; }
+        .btn-active { background: #00b894; color: #000; border-color: #00b894; }
+        
+        /* 日志 */
+        #mst-logs {
+            height: 100px; overflow-y: auto;
+            background: #000; border: 1px solid #333; padding: 4px;
+        }
+        .log-row { border-bottom: 1px dashed #222; margin-bottom: 2px; }
+        .log-time { color: #555; margin-right: 4px; font-size: 10px; }
+        .log-warn { color: #ffeaa7; } .log-error { color: #ff7675; } .log-success { color: #55efc4; }
+    `);
+
+    // ============ 🖥️ UI 构建 ============
+    const UI = {
+        init() {
+            const div = document.createElement('div');
+            div.id = 'mst-panel';
+            div.innerHTML = `
+                <div id="mst-header">
+                    <span>🛡️ MineSttr Guardian</span>
+                    <span id="mst-status">🟢 运行中</span>
+                </div>
+                <div id="mst-content">
+                    <div class="mst-row">
+                        <span style="color:#aaa">⏳ 倒计时:</span>
+                        <span id="mst-countdown" class="mst-val">--</span>
+                    </div>
+                    <div class="mst-btn-group">
+                        <button id="btn-toggle" class="mst-btn">${state.isPaused ? '▶ 启动' : '⏸ 暂停'}</button>
+                        <button id="btn-clear" class="mst-btn">🧹 清空</button>
+                    </div>
+                    <div id="mst-logs"></div>
+                </div>
+            `;
+            document.body.appendChild(div);
+
+            document.getElementById('btn-toggle').onclick = () => {
+                state.isPaused = !state.isPaused;
+                saveState();
+                UI.render();
+                UI.log(state.isPaused ? "⏸️ 脚本暂停" : "▶️ 脚本恢复", 'warn');
+            };
+            document.getElementById('btn-clear').onclick = () => {
+                state.logs = [];
+                saveState();
+                UI.renderLogs();
+            };
+            
+            UI.render();
+            UI.renderLogs();
+        },
+
+        render() {
+            const btn = document.getElementById('btn-toggle');
+            const status = document.getElementById('mst-status');
+            if (state.isPaused) {
+                btn.textContent = "▶ 启动";
+                btn.className = "mst-btn";
+                status.textContent = "⛔ 已暂停";
+                status.style.color = "#aaa";
+            } else {
+                btn.textContent = "⏸ 暂停";
+                btn.className = "mst-btn btn-active";
+                status.textContent = "🟢 运行中";
+                status.style.color = "#00b894";
+            }
+        },
+
+        log(msg, type = 'info') {
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            if (state.logs.length > 0 && state.logs[0].msg === msg) return; // 防刷屏
+            state.logs.unshift({ time, msg, type });
+            if (state.logs.length > CONFIG.maxLogs) state.logs.pop();
+            saveState();
+            UI.renderLogs();
+        },
+
+        renderLogs() {
+            const el = document.getElementById('mst-logs');
+            if (el) el.innerHTML = state.logs.map(l => `<div class="log-row"><span class="log-time">[${l.time}]</span><span class="log-${l.type}">${l.msg}</span></div>`).join('');
+        },
+
+        updateCount(text, color="#fff") {
+            const el = document.getElementById('mst-countdown');
+            if (el) { el.textContent = text; el.style.color = color; }
+        }
+    };
+
+    // ============ 🧠 核心逻辑 ============
+    function getRemainingMinutes() {
+        const fullText = document.body.innerText;
+        // 匹配 3h 50m 或 50m 或 3h
         const regex = /Shuts down in\s*(?:(\d+)h)?\s*(?:(\d+)m)?/i;
         const match = fullText.match(regex);
-
         if (match) {
-            let hours = match[1] ? parseInt(match[1]) : 0;
-            let minutes = match[2] ? parseInt(match[2]) : 0;
-            // 只要匹配到了，就算只有秒数也认为是活着
-            return (hours * 60) + minutes;
+            let h = match[1] ? parseInt(match[1]) : 0;
+            let m = match[2] ? parseInt(match[2]) : 0;
+            return (h * 60) + m;
         }
         return null;
     }
 
-    // 2. 寻找按钮 (严格模式)
     function findButton(keyword) {
         const buttons = document.querySelectorAll('button, a.btn');
         for (let btn of buttons) {
             const text = btn.innerText.toLowerCase().trim();
-            // 排除干扰
-            if (keyword === 'start' && text.includes('restart')) continue;
-            
-            // 只有当按钮真正可见时才返回
-            if (text.includes(keyword) && btn.offsetParent !== null) {
-                return btn;
-            }
+            if (keyword === 'start' && text.includes('restart')) continue; // 排除 restart
+            if (text.includes(keyword) && btn.offsetParent !== null) return btn;
         }
         return null;
     }
 
-    // ============ 🚀 主循环 ============
     function mainLoop() {
-        // 步骤一：先看时间！这是最高优先级
-        // 只要能看到时间，就说明服务器 100% 是活着的
+        if (state.isPaused) return;
+
+        const now = Date.now();
+        const timeElapsed = now - sessionStartTime;
         const remainingMins = getRemainingMinutes();
 
+        // 🟢 情况 1: 只要读到时间，无需等待，直接工作
         if (remainingMins !== null) {
-            // === ✅ 在线状态 ===
-            if (remainingMins <= CONFIG.restartThreshold) {
-                updateUI(`⚡ 仅剩 ${remainingMins} 分钟，执行重启!`, "#ff9900");
-                const restartBtn = findButton('restart') || findButton('reboot') || findButton('重启');
-                if (restartBtn) {
-                    restartBtn.click();
-                    console.log("MineSttr: 已点击重启按钮");
-                } else {
-                    updateUI("❌ 找不到重启按钮", "#ff0000");
-                }
-            } else {
-                updateUI(`🟢 监控中: 剩余 ${remainingMins} 分钟`, "#00ff00");
+            UI.updateCount(`${remainingMins} 分钟`, "#00b894");
+            
+            if (remainingMins <= CONFIG.threshold) {
+                UI.log(`⚡ 倒计时 ${remainingMins}m -> 重启`, 'warn');
+                const btn = findButton('restart') || findButton('reboot') || findButton('重启');
+                if (btn) { btn.click(); UI.log('✅ 点击重启成功', 'success'); }
+                else UI.log('❌ 没找到重启按钮', 'error');
             }
         } 
+        // 🔴 情况 2: 没读到时间 (可能是离线，也可能是刚刷新没加载出来)
         else {
-            // === ❌ 可能离线 ===
-            // 只有在【完全找不到倒计时】的情况下，才允许找 Start 按钮
-            const startBtn = findButton('start') || findButton('启动');
-
-            if (startBtn) {
-                updateUI("⚠️ 倒计时消失，尝试启动...", "#ff3333");
-                startBtn.click();
-                console.log("MineSttr: 已点击启动按钮");
+            // 只有这里需要缓冲！
+            if (timeElapsed < CONFIG.gracePeriod) {
+                // 还在 5 秒缓冲期内，只看，不动手
+                const wait = Math.ceil((CONFIG.gracePeriod - timeElapsed)/1000);
+                UI.updateCount(`加载中... ${wait}s`, "#f1c40f");
             } else {
-                // 如果既没时间，也没Start按钮，那就是正在加载或者未知状态
-                // 这种时候【什么都不要做】，最安全
-                updateUI("🔍 等待状态更新...", "#aaaaaa");
+                // 5秒缓冲已过，依然没时间，判定为离线
+                UI.updateCount("OFFLINE / 离线", "#ff7675");
+                const btn = findButton('start') || findButton('启动');
+                if (btn) {
+                    UI.log('⚠️ 发现离线 -> 启动', 'warn');
+                    btn.click();
+                }
             }
         }
     }
 
-    // ============ ⏳ 启动 ============
-    console.log("MineSttr v5.2 Loaded");
-    setInterval(mainLoop, CONFIG.checkLoop);
-    setTimeout(mainLoop, 2000);
+    // ============ 🚀 启动 ============
+    UI.init();
+    setInterval(mainLoop, CONFIG.checkInterval);
+    setTimeout(mainLoop, 1000); // 1秒后首跑
 
 })();
