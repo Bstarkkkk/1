@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MineSttr Guardian Pro (v7.5 猎人版)
+// @name         MineSttr Guardian Pro (v7.7 精准手术刀版)
 // @namespace    MineSttr-Guard
-// @version      7.5
-// @description  修复“重启按钮”找不到的问题，支持识别纯图标按钮，右下角面板
+// @version      7.7
+// @description  根据用户提供的DevTools截图，通过特定IconClass精准定位重启按钮
 // @author       Gemini
 // @match        https://minestrator.com/my/server/*
 // @grant        GM_setValue
@@ -29,7 +29,7 @@
     // ============ 🎨 UI 样式 (右下角) ============
     GM_addStyle(`
         #mst-panel {
-            position: fixed; bottom: 20px; right: 20px; width: 290px;
+            position: fixed; bottom: 20px; right: 20px; width: 300px;
             background: rgba(10, 10, 10, 0.98); color: #00b894;
             border: 1px solid #00b894; border-radius: 4px;
             font-family: "Consolas", monospace; font-size: 12px; z-index: 999999;
@@ -51,7 +51,7 @@
         .mst-btn:hover { background: #636e72; }
         .btn-active { background: #00b894; color: #000; border-color: #00b894; font-weight: bold; }
         #mst-logs {
-            height: 110px; overflow-y: auto; background: #000; border: 1px solid #333; padding: 5px;
+            height: 120px; overflow-y: auto; background: #000; border: 1px solid #333; padding: 5px;
         }
         .log-row { border-bottom: 1px dashed #222; margin-bottom: 3px; padding-bottom: 1px; }
         .log-time { color: #666; margin-right: 6px; font-size: 10px; }
@@ -115,7 +115,6 @@
         },
         log(msg, type = 'info') {
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-            // 简单的防刷屏：如果上一条消息完全一样，就不重复发
             if (state.logs.length > 0 && state.logs[0].msg === msg) return;
             state.logs.unshift({ time, msg, type });
             if (state.logs.length > CONFIG.maxLogs) state.logs.pop();
@@ -132,7 +131,7 @@
         }
     };
 
-    // ============ 🧠 核心逻辑 (v7.5 增强版) ============
+    // ============ 🧠 核心逻辑 ============
     
     function parseTime() {
         const fullText = document.body.innerText;
@@ -140,23 +139,19 @@
         if (keywordIndex === -1) return null;
 
         const timeSegment = fullText.substring(keywordIndex + 13, keywordIndex + 40);
-
         let h = 0, m = 0, s = 0;
         let foundAny = false;
 
         const matchH = timeSegment.match(/(\d+)\s*h/i);
         if (matchH) { h = parseInt(matchH[1]); foundAny = true; }
-
         const matchM = timeSegment.match(/(\d+)\s*m/i);
         if (matchM) { m = parseInt(matchM[1]); foundAny = true; }
-
         const matchS = timeSegment.match(/(\d+)\s*s/i);
         if (matchS) { s = parseInt(matchS[1]); foundAny = true; }
 
         if (!foundAny) return null;
 
         const totalSeconds = (h * 3600) + (m * 60) + s;
-        // 防误触：如果读出来是0但文字里没有0s，说明读错了
         if (totalSeconds === 0 && !timeSegment.includes('0s')) return null;
 
         let displayStr = "";
@@ -167,45 +162,33 @@
         return { totalSeconds, displayStr };
     }
 
-    // ⭐ 升级后的按钮寻找函数：支持图标识别 ⭐
+    // ⭐ v7.7 核心修复：基于截图的精准定位 ⭐
     function findButton(keyword) {
-        // 定义关键词对应的常见图标类名
-        const iconMap = {
-            'restart': ['fa-redo', 'fa-sync', 'fa-refresh', 'fa-rotate-right', 'fa-undo'],
-            'start': ['fa-play', 'fa-power-off'],
-            'stop': ['fa-stop', 'fa-ban']
-        };
-
-        const buttons = document.querySelectorAll('button, a.btn, a[role="button"], div.btn');
-
-        for (let btn of buttons) {
-            // A. 检查文字 (innerText)
-            const text = btn.innerText.toLowerCase().trim();
-            if (keyword === 'start' && text.includes('restart')) continue;
-            if (text.includes(keyword) && btn.offsetParent !== null) return btn;
-
-            // B. 检查链接或 onclick 属性 (href=".../restart")
-            const href = (btn.getAttribute('href') || "").toLowerCase();
-            const action = (btn.getAttribute('onclick') || "").toLowerCase();
-            const title = (btn.getAttribute('title') || "").toLowerCase();
+        
+        // 1. 如果是找 Restart (重启)
+        if (keyword === 'restart') {
+            // 直接查找包含截图里那个特殊 Class 的 span 元素
+            // Class名包含: i-material-symbols:restart-alt-rounded
+            const icon = document.querySelector('span[class*="restart-alt-rounded"]');
             
-            if (href.includes(keyword) || action.includes(keyword) || title.includes(keyword)) {
-                 if (btn.offsetParent !== null) return btn;
-            }
-
-            // C. 检查图标 (针对纯图标按钮)
-            // 如果我们要找 restart，就去看看按钮里有没有 🔄 这种图标
-            if (iconMap[keyword]) {
-                const icon = btn.querySelector('i, svg');
-                if (icon) {
-                    const iconClass = (icon.getAttribute('class') || "").toLowerCase();
-                    // 只要图标类名里包含 redo, sync, refresh 等字眼
-                    if (iconMap[keyword].some(cls => iconClass.includes(cls)) && btn.offsetParent !== null) {
-                        return btn;
-                    }
+            if (icon) {
+                // 找到了图标，但我们要点的是它的【爸爸】(外层的 button)
+                const btn = icon.closest('button');
+                if (btn) {
+                    console.log("MineSttr Guard: 精准定位到重启按钮");
+                    return btn;
                 }
             }
         }
+
+        // 2. 如果是找 Start (启动) - 保持原来的文字搜索
+        const buttons = document.querySelectorAll('button, a.btn');
+        for (let btn of buttons) {
+            const text = btn.innerText.toLowerCase().trim();
+            if (keyword === 'start' && text.includes('restart')) continue;
+            if (text.includes(keyword) && btn.offsetParent !== null) return btn;
+        }
+        
         return null;
     }
 
@@ -216,31 +199,30 @@
         const timeElapsed = now - sessionStartTime;
         const timeData = parseTime();
 
-        // 🟢 情况 1: 在线 (读到时间)
+        // 🟢 在线模式
         if (timeData !== null) {
             const { totalSeconds, displayStr } = timeData;
-            
             UI.updateCount(displayStr, "#00b894");
             
             const thresholdSeconds = CONFIG.thresholdMinutes * 60;
             
             if (totalSeconds <= thresholdSeconds) {
-                // 时间到了，尝试找重启按钮
                 UI.log(`⚡ 剩余 ${totalSeconds}秒 -> 尝试重启`, 'warn');
-                const btn = findButton('restart') || findButton('reboot') || findButton('重启');
+                
+                // 尝试点击
+                const btn = findButton('restart');
                 
                 if (btn) { 
                     btn.click(); 
                     UI.log('✅ 已点击重启按钮', 'success'); 
-                    // 点击后给自己放个假，防止1秒内点多次
                     state.isPaused = true; 
                     setTimeout(() => { state.isPaused = false; saveState(); }, 5000);
                 } else {
-                    UI.log('❌ 找不到重启按钮 (图标识别失败?)', 'error');
+                    UI.log('❌ 找不到重启按钮 (代码不匹配?)', 'error');
                 }
             }
         } 
-        // 🔴 情况 2: 离线 (没读到时间)
+        // 🔴 离线模式
         else {
             if (timeElapsed < CONFIG.gracePeriod) {
                 const wait = Math.ceil((CONFIG.gracePeriod - timeElapsed)/1000);
@@ -256,7 +238,6 @@
         }
     }
 
-    // ============ 🚀 启动 ============
     UI.init();
     setInterval(mainLoop, CONFIG.checkInterval);
     setTimeout(mainLoop, 1000);
