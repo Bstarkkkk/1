@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MineSttr 智能守护 (视觉读取版)
+// @name         MineSttr 智能守护 (视觉修复版)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
-// @description  直接读取网页上的倒计时文字，剩余时间不足时自动重启
+// @version      5.1
+// @description  修复误判 "Restart" 为 "Start" 的问题，优先读取倒计时
 // @author       Gemini
 // @match        https://minestrator.com/my/server/*
 // @grant        none
@@ -13,19 +13,18 @@
 
     // ============ ⚙️ 配置区域 ============
     const CONFIG = {
-        // 🔴 阈值：当剩余时间小于多少分钟时，执行重启？
-        // 建议设为 10 分钟，给自己留足缓冲期
+        // 剩余多少分钟时重启？(建议 10-20 分钟)
         restartThreshold: 10,
 
-        // 检查频率：每 5 秒看一眼屏幕
-        checkLoop: 60000
+        // 检查频率：每 30 秒检查一次 (足够了，太快没必要)
+        checkLoop: 30000 
     };
 
-    // ============ 🖥️ 状态面板 (HUD) ============
+    // ============ 🖥️ 状态面板 ============
     const ui = document.createElement('div');
     Object.assign(ui.style, {
         position: 'fixed', bottom: '15px', left: '15px',
-        backgroundColor: 'rgba(0, 30, 60, 0.9)', color: '#00ffff',
+        backgroundColor: 'rgba(0, 30, 60, 0.95)', color: '#00ffff',
         padding: '12px', borderRadius: '8px', fontSize: '13px',
         fontFamily: 'Consolas, monospace', zIndex: 999999, pointerEvents: 'none',
         border: '1px solid #00ffff', boxShadow: '0 0 10px rgba(0,255,255,0.2)',
@@ -41,98 +40,77 @@
         ui.innerHTML = `[${time}] ${status}`;
     }
 
-    // ============ 🧠 核心解析函数 ============
-    
-    // 寻找并解析 "Shuts down in Xh Ym Zs"
+    // ============ 🧠 核心功能 ============
+
+    // 1. 读取剩余时间 (这是判断是否在线的金标准)
     function getRemainingMinutes() {
-        // 遍历页面所有元素，寻找包含关键词的文本
-        // 你的截图里文字是 "Shuts down in"，以此为锚点
         const elements = document.querySelectorAll('div, span, p, b, strong');
-        
         for (let el of elements) {
             const text = el.innerText;
             if (text && text.includes("Shuts down in")) {
-                // 找到文字了！开始提取数字
-                // 格式通常是: 3h 50m 10s 或 50m 10s
-                
                 let hours = 0;
                 let minutes = 0;
-
-                // 提取小时 (如果存在)
                 const hMatch = text.match(/(\d+)\s*h/);
                 if (hMatch) hours = parseInt(hMatch[1]);
-
-                // 提取分钟 (如果存在)
                 const mMatch = text.match(/(\d+)\s*m/);
                 if (mMatch) minutes = parseInt(mMatch[1]);
-
-                // 只有当至少提取到数字时才返回
-                if (hMatch || mMatch) {
-                    return (hours * 60) + minutes;
-                }
+                if (hMatch || mMatch) return (hours * 60) + minutes;
             }
         }
-        return null; // 没找到 (可能是服务器离线了，或者是法语界面)
+        return null; // 没找到倒计时
     }
 
-    // 寻找按钮的辅助函数
-    function findButton(keywords) {
+    // 2. 寻找按钮 (修复了包含 restart 的 bug)
+    function findButton(keyword) {
         const buttons = document.querySelectorAll('button, a.btn');
         for (let btn of buttons) {
             const text = btn.innerText.toLowerCase().trim();
-            for (let key of keywords) {
-                if (text.includes(key)) return btn;
-            }
+            // 关键修复：如果找 start，必须排除 restart
+            if (keyword === 'start' && text.includes('restart')) continue;
+            
+            if (text.includes(keyword)) return btn;
         }
         return null;
     }
 
-    // ============ 🚀 主循环逻辑 ============
+    // ============ 🚀 主循环 ============
     function mainLoop() {
-        // 1. 第一优先级：服务器是不是挂了？(找 Start 按钮)
-        const startBtn = findButton(['start', 'démarrer', '启动', 'open']);
-        if (startBtn && startBtn.offsetParent !== null) { // 按钮存在且可见
-            updateUI("⚠️ 发现离线，正在启动...", "#ff3333");
-            startBtn.click();
-            return;
-        }
-
-        // 2. 第二优先级：读取剩余时间
+        // 第一步：先看有没有倒计时？如果有，说明服务器绝对是活着的！
         const remainingMins = getRemainingMinutes();
 
         if (remainingMins !== null) {
-            // 成功读到了时间
+            // === 在线模式 ===
             if (remainingMins <= CONFIG.restartThreshold) {
-                // 时间不够了！执行重启
-                updateUI(`⚡ 仅剩 ${remainingMins} 分钟，正在重启!`, "#ff9900");
-                
-                const restartBtn = findButton(['restart', 'redémarrer', '重启', 'reboot']);
-                if (restartBtn) {
-                    restartBtn.click();
-                } else {
-                    updateUI("❌ 找不到重启按钮，请手动操作!", "#ff0000");
-                }
+                updateUI(`⚡ 仅剩 ${remainingMins} 分钟，执行重启!`, "#ff9900");
+                const restartBtn = findButton('restart') || findButton('reboot') || findButton('重启');
+                if (restartBtn) restartBtn.click();
+                else updateUI("❌ 找不到重启按钮", "#ff0000");
             } else {
-                // 时间还充裕，更新 UI 显示
-                updateUI(`🟢 监控中: 剩余 ${remainingMins} 分钟`, "#00ff00");
+                updateUI(`🟢 在线监控中: 剩余 ${remainingMins} 分钟`, "#00ff00");
             }
-        } else {
-            // 3. 既没看到Start按钮，也没看到倒计时文本
-            // 可能是正在加载，或者是 "Online" 但没有倒计时显示？
-            // 尝试找一下 "Offline" 文本确认状态
-            if (document.body.innerText.includes("Offline")) {
-                 updateUI("⚪ 服务器离线等待中...", "#aaaaaa");
+        } 
+        else {
+            // === 离线/未知模式 ===
+            // 只有当找不到倒计时的时候，才去检查有没有 Start 按钮
+            // 这样就避免了误触
+            const startBtn = findButton('start') || findButton('启动');
+            
+            // 再次确认：页面上是否真的有 "Offline" 字样？(双重保险)
+            const isOfflineTextPresent = document.body.innerText.includes("Offline");
+
+            if (startBtn && startBtn.offsetParent !== null && isOfflineTextPresent) {
+                updateUI("⚠️ 发现离线，正在启动...", "#ff3333");
+                startBtn.click();
             } else {
-                 updateUI("🔍 正在寻找倒计时信息...", "#ffff00");
+                // 可能是正在加载，或者页面结构变了
+                updateUI("🔍 等待服务器状态加载...", "#aaaaaa");
             }
         }
     }
 
     // ============ ⏳ 启动 ============
-    console.log("MineSttr 视觉脚本已启动");
+    console.log("MineSttr 视觉修复版 v5.1 已启动");
     setInterval(mainLoop, CONFIG.checkLoop);
-
-    // 第一次运行稍微延迟一下，等网页加载完
     setTimeout(mainLoop, 2000);
 
 })();
