@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MineSttr Guardian Pro (v7.1 极速版)
+// @name         MineSttr Guardian Pro (v7.2 精确秒数版)
 // @namespace    MineSttr-Guard
-// @version      7.1
-// @description  5秒微缓冲，既防止刚刷新时的误判，又不浪费时间
+// @version      7.2
+// @description  支持精确到秒的倒计时读取，UI实时跳动，5秒极速缓冲
 // @author       Gemini
 // @match        https://minestrator.com/my/server/*
 // @grant        GM_setValue
@@ -15,14 +15,10 @@
 
     // ============ ⚙️ 核心配置 ============
     const CONFIG = {
-        threshold: 10,        // 剩余 10 分钟时重启
-        checkInterval: 5000,  // 每 5 秒检查一次 (加快检查频率)
-        
-        // 🛡️ 缓冲期改为 5000 毫秒 (5秒)
-        // 页面刚刷新的 5 秒内，禁止点击“Start”按钮，给网页文字加载留点时间
-        gracePeriod: 5000,   
-        
-        maxLogs: 50           // 日志保留条数
+        thresholdMinutes: 10, // 剩余 10 分钟时重启
+        checkInterval: 2000,  // 改为每 2 秒检查一次 (为了让秒数跳动更跟手)
+        gracePeriod: 5000,    // 5秒缓冲期 (网页刚刷新时防误判)
+        maxLogs: 50
     };
 
     // ============ 💾 状态管理 ============
@@ -35,49 +31,52 @@
         GM_setValue('minesttr_state_v7', state);
     }
 
-    // 记录本次脚本启动时间
     const sessionStartTime = Date.now();
 
-    // ============ 🎨 UI 样式 (极客黑绿) ============
+    // ============ 🎨 UI 样式 (极客风格) ============
     GM_addStyle(`
         #mst-panel {
-            position: fixed; bottom: 20px; left: 20px; width: 280px;
-            background: rgba(10, 10, 10, 0.95);
+            position: fixed; bottom: 20px; left: 20px; width: 290px;
+            background: rgba(5, 5, 5, 0.95);
             color: #00b894;
             border: 1px solid #00b894;
             border-radius: 4px;
-            font-family: "Consolas", monospace;
+            font-family: "Consolas", "Monaco", monospace;
             font-size: 12px;
             z-index: 999999;
-            box-shadow: 0 0 10px rgba(0, 184, 148, 0.15);
+            box-shadow: 0 0 15px rgba(0, 184, 148, 0.1);
         }
         #mst-header {
-            padding: 6px 10px;
+            padding: 8px 10px;
             border-bottom: 1px solid #00b894;
             display: flex; justify-content: space-between; align-items: center;
-            font-weight: bold; background: rgba(0, 184, 148, 0.1);
+            font-weight: bold; background: rgba(0, 184, 148, 0.15);
         }
         #mst-content { padding: 10px; }
-        .mst-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
-        .mst-val { font-weight: bold; color: #fff; }
+        .mst-row { display: flex; justify-content: space-between; margin-bottom: 6px; align-items: center; }
         
-        /* 按钮 */
-        .mst-btn-group { display: flex; gap: 5px; margin-top: 8px; margin-bottom: 8px; }
+        /* 倒计时数字特化 */
+        .mst-val { font-weight: bold; color: #fff; letter-spacing: 0.5px; }
+        
+        .mst-btn-group { display: flex; gap: 5px; margin-top: 10px; margin-bottom: 8px; }
         .mst-btn {
-            flex: 1; padding: 4px 0; border: 1px solid #333; border-radius: 3px;
-            cursor: pointer; color: #fff; background: #2d3436; font-size: 11px;
+            flex: 1; padding: 5px 0; border: 1px solid #333; border-radius: 3px;
+            cursor: pointer; color: #fff; background: #2d3436; font-size: 11px; transition: all 0.2s;
         }
         .mst-btn:hover { background: #636e72; }
-        .btn-active { background: #00b894; color: #000; border-color: #00b894; }
+        .btn-active { background: #00b894; color: #000; border-color: #00b894; font-weight: bold; }
         
-        /* 日志 */
         #mst-logs {
-            height: 100px; overflow-y: auto;
-            background: #000; border: 1px solid #333; padding: 4px;
+            height: 110px; overflow-y: auto;
+            background: #000; border: 1px solid #333; padding: 5px;
         }
-        .log-row { border-bottom: 1px dashed #222; margin-bottom: 2px; }
-        .log-time { color: #555; margin-right: 4px; font-size: 10px; }
+        .log-row { border-bottom: 1px dashed #222; margin-bottom: 3px; padding-bottom: 1px; }
+        .log-time { color: #666; margin-right: 6px; font-size: 10px; }
         .log-warn { color: #ffeaa7; } .log-error { color: #ff7675; } .log-success { color: #55efc4; }
+        
+        /* 滚动条 */
+        #mst-logs::-webkit-scrollbar { width: 4px; }
+        #mst-logs::-webkit-scrollbar-thumb { background: #00b894; border-radius: 2px; }
     `);
 
     // ============ 🖥️ UI 构建 ============
@@ -92,8 +91,12 @@
                 </div>
                 <div id="mst-content">
                     <div class="mst-row">
-                        <span style="color:#aaa">⏳ 倒计时:</span>
-                        <span id="mst-countdown" class="mst-val">--</span>
+                        <span style="color:#aaa">⏱️ 倒计时:</span>
+                        <span id="mst-countdown" class="mst-val">正在同步...</span>
+                    </div>
+                    <div class="mst-row">
+                        <span style="color:#aaa">🎯 阈值:</span>
+                        <span class="mst-val">< ${CONFIG.thresholdMinutes}m (600s)</span>
                     </div>
                     <div class="mst-btn-group">
                         <button id="btn-toggle" class="mst-btn">${state.isPaused ? '▶ 启动' : '⏸ 暂停'}</button>
@@ -107,7 +110,7 @@
             document.getElementById('btn-toggle').onclick = () => {
                 state.isPaused = !state.isPaused;
                 saveState();
-                UI.render();
+                UI.renderControls();
                 UI.log(state.isPaused ? "⏸️ 脚本暂停" : "▶️ 脚本恢复", 'warn');
             };
             document.getElementById('btn-clear').onclick = () => {
@@ -116,11 +119,11 @@
                 UI.renderLogs();
             };
             
-            UI.render();
+            UI.renderControls();
             UI.renderLogs();
         },
 
-        render() {
+        renderControls() {
             const btn = document.getElementById('btn-toggle');
             const status = document.getElementById('mst-status');
             if (state.isPaused) {
@@ -138,7 +141,7 @@
 
         log(msg, type = 'info') {
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-            if (state.logs.length > 0 && state.logs[0].msg === msg) return; // 防刷屏
+            if (state.logs.length > 0 && state.logs[0].msg === msg) return;
             state.logs.unshift({ time, msg, type });
             if (state.logs.length > CONFIG.maxLogs) state.logs.pop();
             saveState();
@@ -156,16 +159,33 @@
         }
     };
 
-    // ============ 🧠 核心逻辑 ============
-    function getRemainingMinutes() {
+    // ============ 🧠 核心逻辑 (秒级精度) ============
+    
+    // 解析时间：返回总秒数 + 格式化字符串
+    function parseTime() {
         const fullText = document.body.innerText;
-        // 匹配 3h 50m 或 50m 或 3h
-        const regex = /Shuts down in\s*(?:(\d+)h)?\s*(?:(\d+)m)?/i;
+        // 升级版正则：支持 h, m, s 的任意组合
+        // 例子: "3h 34m 54s" 或 "50m 10s" 或 "59s"
+        const regex = /Shuts down in\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i;
         const match = fullText.match(regex);
+        
         if (match) {
+            // 如果全是 undefined (比如没匹配到数字)，说明没找到
+            if (!match[1] && !match[2] && !match[3]) return null;
+
             let h = match[1] ? parseInt(match[1]) : 0;
             let m = match[2] ? parseInt(match[2]) : 0;
-            return (h * 60) + m;
+            let s = match[3] ? parseInt(match[3]) : 0;
+            
+            const totalSeconds = (h * 3600) + (m * 60) + s;
+            
+            // 生成好看的显示字符串
+            let displayStr = "";
+            if (h > 0) displayStr += `${h}h `;
+            if (m > 0 || h > 0) displayStr += `${m}m `; // 如果有小时，分钟即使是0也要显示
+            displayStr += `${s}s`;
+
+            return { totalSeconds, displayStr };
         }
         return null;
     }
@@ -174,7 +194,7 @@
         const buttons = document.querySelectorAll('button, a.btn');
         for (let btn of buttons) {
             const text = btn.innerText.toLowerCase().trim();
-            if (keyword === 'start' && text.includes('restart')) continue; // 排除 restart
+            if (keyword === 'start' && text.includes('restart')) continue;
             if (text.includes(keyword) && btn.offsetParent !== null) return btn;
         }
         return null;
@@ -185,41 +205,13 @@
 
         const now = Date.now();
         const timeElapsed = now - sessionStartTime;
-        const remainingMins = getRemainingMinutes();
+        const timeData = parseTime(); // 获取秒级数据
 
-        // 🟢 情况 1: 只要读到时间，无需等待，直接工作
-        if (remainingMins !== null) {
-            UI.updateCount(`${remainingMins} 分钟`, "#00b894");
+        // 🟢 情况 1: 读到倒计时 (在线)
+        if (timeData !== null) {
+            const { totalSeconds, displayStr } = timeData;
             
-            if (remainingMins <= CONFIG.threshold) {
-                UI.log(`⚡ 倒计时 ${remainingMins}m -> 重启`, 'warn');
-                const btn = findButton('restart') || findButton('reboot') || findButton('重启');
-                if (btn) { btn.click(); UI.log('✅ 点击重启成功', 'success'); }
-                else UI.log('❌ 没找到重启按钮', 'error');
-            }
-        } 
-        // 🔴 情况 2: 没读到时间 (可能是离线，也可能是刚刷新没加载出来)
-        else {
-            // 只有这里需要缓冲！
-            if (timeElapsed < CONFIG.gracePeriod) {
-                // 还在 5 秒缓冲期内，只看，不动手
-                const wait = Math.ceil((CONFIG.gracePeriod - timeElapsed)/1000);
-                UI.updateCount(`加载中... ${wait}s`, "#f1c40f");
-            } else {
-                // 5秒缓冲已过，依然没时间，判定为离线
-                UI.updateCount("OFFLINE / 离线", "#ff7675");
-                const btn = findButton('start') || findButton('启动');
-                if (btn) {
-                    UI.log('⚠️ 发现离线 -> 启动', 'warn');
-                    btn.click();
-                }
-            }
-        }
-    }
-
-    // ============ 🚀 启动 ============
-    UI.init();
-    setInterval(mainLoop, CONFIG.checkInterval);
-    setTimeout(mainLoop, 1000); // 1秒后首跑
-
-})();
+            // 实时更新 UI 倒计时
+            UI.updateCount(displayStr, "#00b894");
+            
+            //
